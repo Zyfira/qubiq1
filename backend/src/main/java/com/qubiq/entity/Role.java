@@ -1,0 +1,1 @@
+package com.qubiq.entity; public enum Role { STUDENT, TEACHER, ADMIN }
