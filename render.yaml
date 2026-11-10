@@ -3,7 +3,6 @@ services:
     name: qubiq-api
     runtime: docker
     plan: free
-    runtime: docker
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     healthCheckPath: /actuator/health
