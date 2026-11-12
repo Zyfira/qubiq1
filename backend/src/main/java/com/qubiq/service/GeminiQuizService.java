@@ -14,7 +14,6 @@ import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import java.util.*;
-import java.util.concurrent.TimeUnit;
 
 @Service
 public class GeminiQuizService {
@@ -26,9 +25,7 @@ public class GeminiQuizService {
     private volatile List<String> cachedModels = List.of();
     private volatile long cacheExpiresAt = 0;
 
-    private static final long CACHE_DURATION_MS =
-        TimeUnit.MINUTES.toMillis(5);
-
+    private static final long CACHE_DURATION_MS = 5 * 60 * 1000;
     private static final int MAX_MODELS_TO_TRY = 8;
 
     public GeminiQuizService(
@@ -40,6 +37,10 @@ public class GeminiQuizService {
         this.mapper = mapper;
         this.apiKey = apiKey;
     }
+
+    // ==================================================
+    // MAIN QUIZ GENERATION
+    // ==================================================
 
     public Map<String, Object> generate(
             String sourceText,
@@ -91,6 +92,7 @@ public class GeminiQuizService {
         for (String model : models) {
 
             try {
+
                 System.out.println(
                     "Qubiq: Trying Gemini model: " + model
                 );
@@ -112,7 +114,9 @@ public class GeminiQuizService {
 
                 int status = ex.getStatusCode().value();
 
-                String details = safeError(ex.getResponseBodyAsString());
+                String details = safeError(
+                    ex.getResponseBodyAsString()
+                );
 
                 failures.add(
                     model + " returned HTTP " + status + ": " + details
@@ -131,14 +135,9 @@ public class GeminiQuizService {
                     );
                 }
 
-                // Try the next available model.
                 System.err.println(
-                    "Qubiq: Trying another available Gemini model."
+                    "Qubiq: Trying the next available model."
                 );
-
-            } catch (ResponseStatusException ex) {
-
-                throw ex;
 
             } catch (Exception ex) {
 
@@ -148,6 +147,7 @@ public class GeminiQuizService {
 
                 System.err.println(
                     "Qubiq: Could not process response from " + model
+                    + ". " + ex.getMessage()
                 );
             }
         }
@@ -165,9 +165,9 @@ public class GeminiQuizService {
         );
     }
 
-    // --------------------------------------------------
+    // ==================================================
     // INPUT VALIDATION
-    // --------------------------------------------------
+    // ==================================================
 
     private void validateInput(
             String sourceText,
@@ -204,9 +204,9 @@ public class GeminiQuizService {
         }
     }
 
-    // --------------------------------------------------
-    // MODEL DISCOVERY
-    // --------------------------------------------------
+    // ==================================================
+    // AUTOMATIC MODEL DISCOVERY
+    // ==================================================
 
     private List<String> discoverModels() {
 
@@ -223,22 +223,22 @@ public class GeminiQuizService {
             }
 
             List<JsonNode> discovered = new ArrayList<>();
-
             String pageToken = null;
 
-            // Read all pages returned by Google's model-list API.
             for (int page = 0; page < 10; page++) {
 
-                String url = UriComponentsBuilder
-                    .fromUriString(
-                        "https://generativelanguage.googleapis.com/v1beta/models"
-                    )
-                    .queryParam("pageSize", 1000)
-                    .queryParamIfPresent(
-                        "pageToken",
-                        Optional.ofNullable(pageToken)
-                    )
-                    .build()
+                UriComponentsBuilder builder =
+                    UriComponentsBuilder
+                        .fromUriString(
+                            "https://generativelanguage.googleapis.com/v1beta/models"
+                        )
+                        .queryParam("pageSize", 1000);
+
+                if (pageToken != null && !pageToken.isBlank()) {
+                    builder.queryParam("pageToken", pageToken);
+                }
+
+                String url = builder.build()
                     .encode()
                     .toUriString();
 
@@ -258,7 +258,8 @@ public class GeminiQuizService {
                         HttpStatus.BAD_GATEWAY,
                         "Could not discover Gemini models. Google returned HTTP "
                         + ex.getStatusCode().value()
-                        + ": " + safeError(ex.getResponseBodyAsString())
+                        + ": "
+                        + safeError(ex.getResponseBodyAsString())
                     );
                 }
 
@@ -289,10 +290,8 @@ public class GeminiQuizService {
                     continue;
                 }
 
-                JsonNode methods =
-                    model.path("supportedGenerationMethods");
-
-                if (!supportsGeneration(methods)) {
+                if (!supportsGeneration(
+                        model.path("supportedGenerationMethods"))) {
                     continue;
                 }
 
@@ -308,7 +307,6 @@ public class GeminiQuizService {
 
                 String lowerName = name.toLowerCase(Locale.ROOT);
 
-                // Exclude models intended for unrelated tasks.
                 if (lowerName.contains("embedding")
                         || lowerName.contains("tts")
                         || lowerName.contains("live")
@@ -322,8 +320,6 @@ public class GeminiQuizService {
                 eligible.add(model);
             }
 
-            // Prefer stable Flash models, then other stable Gemini
-            // generation models as fallback candidates.
             eligible.sort(
                 Comparator
                     .comparingInt(this::modelPriority)
@@ -366,6 +362,7 @@ public class GeminiQuizService {
         }
 
         for (JsonNode method : methods) {
+
             if ("generateContent".equals(method.asText())) {
                 return true;
             }
@@ -384,8 +381,8 @@ public class GeminiQuizService {
             .asText("")
             .toUpperCase(Locale.ROOT);
 
-        boolean stable = stage.isBlank()
-            || stage.equals("STABLE");
+        boolean stable =
+            stage.isBlank() || stage.equals("STABLE");
 
         if (stable && name.contains("flash")) {
             return 1;
@@ -406,20 +403,30 @@ public class GeminiQuizService {
         return 5;
     }
 
-    // --------------------------------------------------
-    // GEMINI REQUEST
-    // --------------------------------------------------
+    // ==================================================
+    // GEMINI API REQUEST
+    // ==================================================
 
     private JsonNode callGemini(
             String model,
             Map<String, Object> request
     ) {
 
+        // IMPORTANT:
+        // The model already contains "models/".
+        // Build the URL directly to preserve the slash.
+
+        String url =
+            "https://generativelanguage.googleapis.com/v1beta/"
+            + model
+            + ":generateContent";
+
+        System.out.println(
+            "Qubiq: Gemini request URL: " + url
+        );
+
         return restClient.post()
-            .uri(
-                "https://generativelanguage.googleapis.com/v1beta/{model}:generateContent",
-                model
-            )
+            .uri(url)
             .header("x-goog-api-key", apiKey)
             .contentType(MediaType.APPLICATION_JSON)
             .body(request)
@@ -437,9 +444,9 @@ public class GeminiQuizService {
             || status == 504;
     }
 
-    // --------------------------------------------------
-    // QUIZ PROMPT
-    // --------------------------------------------------
+    // ==================================================
+    // QUIZ GENERATION PROMPT
+    // ==================================================
 
     private String buildPrompt(
             String sourceText,
@@ -454,11 +461,12 @@ public class GeminiQuizService {
             at %s difficulty using ONLY the supplied PDF content.
 
             RULES:
+
             1. Generate exactly %d different questions.
             2. Each question must have exactly four options.
             3. Each question must have exactly one correct answer.
             4. correctOption must be a zero-based integer from 0 to 3.
-            5. Every question must have 1 mark.
+            5. Give each question 1 mark.
             6. Do not invent facts.
             7. Avoid duplicate questions.
             8. Avoid duplicate options.
@@ -498,9 +506,9 @@ public class GeminiQuizService {
             );
     }
 
-    // --------------------------------------------------
+    // ==================================================
     // RESPONSE PARSING AND VALIDATION
-    // --------------------------------------------------
+    // ==================================================
 
     private Map<String, Object> parseQuiz(
             JsonNode response,
@@ -515,7 +523,7 @@ public class GeminiQuizService {
 
         JsonNode candidates = response.path("candidates");
 
-        if (!candidates.isArray() || candidates.isEmpty()) {
+        if (!candidates.isArray() || candidates.size() == 0) {
 
             String reason = response.path("promptFeedback")
                 .path("blockReason")
@@ -543,14 +551,19 @@ public class GeminiQuizService {
             );
         }
 
-        JsonNode parts = candidate.path("content").path("parts");
+        JsonNode parts =
+            candidate.path("content").path("parts");
 
         StringBuilder generated = new StringBuilder();
 
         if (parts.isArray()) {
+
             for (JsonNode part : parts) {
+
                 if (part.hasNonNull("text")) {
-                    generated.append(part.get("text").asText());
+                    generated.append(
+                        part.get("text").asText()
+                    );
                 }
             }
         }
@@ -650,29 +663,37 @@ public class GeminiQuizService {
             throw new IllegalStateException(
                 "Only " + questions.size()
                 + " valid questions generated out of "
-                + questionCount + ". Please try again."
+                + questionCount
+                + ". Please try again."
             );
         }
 
         Map<String, Object> result = new LinkedHashMap<>();
 
         result.put("title", title);
+
         result.put(
             "description",
             description.isBlank()
                 ? "Generated from uploaded study material."
                 : description
         );
+
         result.put("questions", questions);
 
         return result;
     }
+
+    // ==================================================
+    // HELPERS
+    // ==================================================
 
     private String stripFences(String value) {
 
         String cleaned = value.trim();
 
         if (cleaned.startsWith("```")) {
+
             cleaned = cleaned.replaceFirst(
                 "^```(?:json)?\\s*", ""
             );
@@ -691,8 +712,10 @@ public class GeminiQuizService {
             return "No additional error details provided.";
         }
 
-        // Avoid accidentally exposing API keys in error text.
-        String cleaned = value.replace(apiKey, "[REDACTED]");
+        String cleaned = value.replace(
+            apiKey,
+            "[REDACTED]"
+        );
 
         if (cleaned.length() > 700) {
             cleaned = cleaned.substring(0, 700);
