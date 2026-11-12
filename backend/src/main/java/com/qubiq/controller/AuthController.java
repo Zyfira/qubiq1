@@ -22,8 +22,6 @@ public class AuthController {
     private final PasswordEncoder encoder;
     private final JwtService jwt;
 
-    private static final String ALLOWED_DOMAIN = "@sjcit.ac.in";
-
     public AuthController(
             UserRepository users,
             PasswordEncoder encoder,
@@ -37,7 +35,7 @@ public class AuthController {
     record Register(
         @NotBlank String name,
         @Email @NotBlank String email,
-        @Size(min = 8) String password,
+        @NotBlank @Size(min = 8) String password,
         String role
     ) {}
 
@@ -59,12 +57,6 @@ public class AuthController {
         UserView user
     ) {}
 
-    private boolean isAllowedEmail(String email) {
-        return email != null
-            && email.toLowerCase(Locale.ROOT).trim()
-                .endsWith(ALLOWED_DOMAIN);
-    }
-
     private UserView view(User user) {
         return new UserView(
             user.getId(),
@@ -81,14 +73,8 @@ public class AuthController {
     ) {
 
         String email = r.email()
-            .toLowerCase(Locale.ROOT).trim();
-
-        if (!isAllowedEmail(email)) {
-            return ResponseEntity.badRequest().body(
-                Map.of("message",
-                    "Only @sjcit.ac.in email addresses are allowed.")
-            );
-        }
+            .toLowerCase(Locale.ROOT)
+            .trim();
 
         if (users.existsByEmail(email)) {
             return ResponseEntity.badRequest().body(
@@ -115,7 +101,7 @@ public class AuthController {
         user.setPassword(encoder.encode(r.password()));
         user.setRole(role);
 
-        // All institutional accounts are active immediately.
+        // No admin approval required.
         user.setApproved(true);
 
         users.save(user);
@@ -131,26 +117,26 @@ public class AuthController {
     ) {
 
         String email = r.email()
-            .toLowerCase(Locale.ROOT).trim();
-
-        if (!isAllowedEmail(email)) {
-            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(
-                Map.of("message",
-                    "Please use your @sjcit.ac.in institutional email.")
-            );
-        }
+            .toLowerCase(Locale.ROOT)
+            .trim();
 
         User user = users.findByEmail(email).orElse(null);
 
         if (user == null
-                || !encoder.matches(r.password(), user.getPassword())) {
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                || !encoder.matches(
+                    r.password(),
+                    user.getPassword()
+                )) {
+            return ResponseEntity.status(
+                HttpStatus.UNAUTHORIZED
+            ).body(
                 Map.of("message", "Invalid email or password.")
             );
         }
 
-        // Automatically activate existing teacher accounts too.
-        if (user.getRole() == Role.TEACHER && !user.isApproved()) {
+        // Activate previously pending teacher accounts.
+        if (user.getRole() == Role.TEACHER
+                && !user.isApproved()) {
             user.setApproved(true);
             users.save(user);
         }
