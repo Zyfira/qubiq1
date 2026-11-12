@@ -39,13 +39,6 @@ public class CurrentUser {
 
         User user = get();
 
-        if (user.getRole() == Role.TEACHER && !user.isApproved()) {
-            throw new ResponseStatusException(
-                HttpStatus.FORBIDDEN,
-                "Teacher account is awaiting admin approval."
-            );
-        }
-
         if (user.getRole() != Role.TEACHER
                 && user.getRole() != Role.ADMIN) {
 
